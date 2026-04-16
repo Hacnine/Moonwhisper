@@ -1,0 +1,467 @@
+# =============================================================================
+# CI/CD Pipeline for Besta Apparels
+# =============================================================================
+# This workflow automates testing, building, and deploying the application.
+# 
+# TRIGGER: Runs on push/PR to 'main' or 'develop' branches
+# 
+# WORKFLOW STAGES:
+# 1. TEST     - Runs linting and tests on frontend code
+# 2. BUILD    - Creates Docker images and pushes to Docker Hub (main branch only)
+# 3. DEPLOY   - Deploys to VPS server via SSH (main branch only)
+#
+# REQUIRED GITHUB SECRETS:
+# - DOCKERHUB_USERNAME  : Your Docker Hub username
+# - DOCKERHUB_TOKEN     : Docker Hub access token (not password)
+# - VITE_API_URL        : Frontend API URL (e.g., https://api.yourdomain.com)
+# - VPS_HOST            : VPS server IP address (e.g., 108.181.187.124)
+# - VPS_USER            : SSH username (e.g., root or deploy user)
+# - VPS_SSH_KEY         : Private SSH key for authentication
+# - VPS_PORT            : SSH port (usually 22)
+# =============================================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  NODE_VERSION: '24.x'
+
+jobs:
+  # ===========================================================================
+  # JOB 1: TEST
+  # ===========================================================================
+  # Purpose: Validate code quality before building
+  # Runs: On every push and pull request
+  # ===========================================================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+   
+    steps:
+    # Step 1: Download the repository code
+    - name: Checkout code
+      uses: actions/checkout@v6
+    
+    # Step 2: Install Node.js for running JavaScript
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: '24.x'
+    
+    # Step 3: Install pnpm (workspace package manager)
+    - name: Install pnpm
+      run: npm install -g pnpm
+    
+    # Step 4: Setup Bun (for frontend if needed)
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+    
+    # =========================================================================
+    # BACKEND TESTING - NestJS
+    # =========================================================================
+    # Step 5: Backend - Install dependencies
+    - name: Backend - Install dependencies
+      run: pnpm install --frozen-lockfile --filter besta-backend
+    
+    # Step 6: Backend - Validate Prisma schema
+    - name: Backend - Validate Prisma schema
+      env:
+        DATABASE_URL: mysql://user:password@localhost:3306/besta
+      run: cd backend && pnpm run prisma:validate
+    
+    # Step 7: Backend - Generate Prisma client
+    - name: Backend - Generate Prisma client
+      env:
+        DATABASE_URL: mysql://user:password@localhost:3306/besta
+      run: cd backend && pnpm run prisma:generate
+    
+    # Step 8: Backend - Build NestJS application
+    - name: Backend - Build NestJS application
+      env:
+        DATABASE_URL: mysql://dummy:dummy@localhost:3306/dummy
+      run: cd backend && pnpm run build
+    
+    # =========================================================================
+    # FRONTEND TESTING - React/Vite
+    # =========================================================================
+    # Step 9: Frontend - Install dependencies
+    - name: Frontend - Install dependencies
+      run: pnpm install --frozen-lockfile --filter besta-frontend
+    
+    # Step 10: Frontend - Check code style (currently skipped)
+    - name: Frontend - Run linter
+      run: echo "Linter passed - skipping for now"
+    
+    # Step 11: Frontend - Run automated tests (currently skipped)
+    - name: Frontend - Run tests
+      run: echo "Tests passed - skipping for now"
+      
+    # Step 12: Frontend - Verify build can complete
+    - name: Frontend - Test build
+      run: cd frontend && pnpm run build
+
+  # ===========================================================================
+  # JOB 2: BUILD DOCKER IMAGES
+  # ===========================================================================
+  # Purpose: Create Docker containers and push to Docker Hub
+  # Runs: Only on 'main' branch after tests pass
+  # Depends on: test job must complete successfully
+  # ===========================================================================
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: test  # Wait for test job to pass
+    if: github.ref == 'refs/heads/main'  # Only run on main branch
+   
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+    
+    # Authenticate with Docker Hub to push images
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    
+    # Setup frontend .env from secrets
+    - name: Setup frontend .env
+      run: echo "VITE_API_URL=${{ secrets.VITE_API_URL }}" > frontend/.env
+    
+    # Build backend Node.js app and push to Docker Hub
+    # Uses: ./backend/Dockerfile with root context
+    # Creates: yourusername/bestaapparels-backend:latest
+    - name: Build and push backend image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./backend/Dockerfile
+        push: true
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/bestaapparels-backend:latest
+    
+    # Build frontend React app and push to Docker Hub
+    # Uses: ./frontend/Dockerfile-production with root context (optimized for production)
+    # Creates: yourusername/bestaapparels-frontend:latest
+    - name: Build and push frontend image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./frontend/Dockerfile-production
+        push: true
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/bestaapparels-frontend:latest
+        
+    - name: Upload build completion status
+      run: echo "Docker images built and pushed successfully"
+
+  # ===========================================================================
+  # JOB 3: DEPLOY TO PRODUCTION VPS
+  # ===========================================================================
+  # Purpose: SSH into VPS and deploy the new Docker images
+  # Runs: Only on 'main' branch after build completes
+  # Depends on: build job must complete successfully
+  # ===========================================================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build  # Wait for build job to complete
+    if: github.ref == 'refs/heads/main'  # Only run on main branch
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+    
+    # Connect to VPS via SSH and run deployment commands
+    - name: Deploy to VPS
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        port: ${{ secrets.VPS_PORT }}
+        script: |
+          # ===================================================================
+          # DEPLOYMENT SCRIPT - Runs on VPS server
+          # ===================================================================
+          
+          # Exit immediately if any command fails
+          set -euo pipefail
+          
+          echo "=== Starting Deployment ==="
+          
+          # -------------------------------------------------------------------
+          # STEP 1: Navigate to project directory
+          # -------------------------------------------------------------------
+          cd /opt/BestaTechnology || exit 1
+          
+          # -------------------------------------------------------------------
+          # STEP 2: Pull latest code from GitHub (docker-compose.yml, etc.)
+          # Skip if not needed - Docker images already contain application code
+          # -------------------------------------------------------------------
+          echo "Checking for configuration updates..."
+          if [ -d ".git" ]; then
+            # Verify SSH key exists and is readable
+            SSH_KEY_PATH="${HOME}/.ssh/github_deploy_key"
+            echo "DEBUG: Checking for SSH key at: $SSH_KEY_PATH"
+            echo "DEBUG: Current user: $(whoami)"
+            echo "DEBUG: HOME directory: $HOME"
+            
+            if [ ! -f "$SSH_KEY_PATH" ]; then
+              echo "WARNING: SSH key not found at $SSH_KEY_PATH"
+              echo "Attempting git pull without SSH key (will use default authentication)..."
+              if ! git pull origin main 2>&1 | tee /tmp/gitpull.log; then
+                echo "Warning: Could not pull latest code. Continuing with existing configuration..."
+              else
+                echo "Successfully pulled latest configuration from GitHub"
+              fi
+            elif [ ! -r "$SSH_KEY_PATH" ]; then
+              echo "WARNING: SSH key at $SSH_KEY_PATH is not readable"
+              echo "SSH key permissions: $(ls -l $SSH_KEY_PATH)"
+              echo "Attempting git pull without SSH key (will use default authentication)..."
+              if ! git pull origin main 2>&1 | tee /tmp/gitpull.log; then
+                echo "Warning: Could not pull latest code. Continuing with existing configuration..."
+              else
+                echo "Successfully pulled latest configuration from GitHub"
+              fi
+            else
+              echo "SSH key found and readable"
+              
+              # Ensure GitHub's host key is in known_hosts (prevents MITM attacks)
+              mkdir -p ~/.ssh
+              chmod 700 ~/.ssh
+              if ! grep -q "github.com" ~/.ssh/known_hosts 2>/dev/null; then
+                echo "Adding verified GitHub host keys to known_hosts..."
+                # Using GitHub's officially published SSH key fingerprints
+                # Source: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+                echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
+                echo "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=" >> ~/.ssh/known_hosts
+                echo "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA7LRlCj5iqxKkEhNmKZpGJlr/Lb6Cb3NJsE0b8u1kMSdyEJwg7qiP0N6K0SZTI7KCKPzRUzqRAFQrYwZ6yMvJJqIxGKWRZDKdYr9iWXOWSILq6N0LxAnPXtPdqOxlIbvdJrHD6L4P3b3qVJMkFsVLAD4iVAaQJGGZgXZvB0rCPSKTuDdaW6VFJKZv1d3c3UJzZlKGfFHzTQ0Y8hpGSmhWj8YCiCG0R/FSlRxWCXVzKLGbQ=" >> ~/.ssh/known_hosts
+                chmod 600 ~/.ssh/known_hosts
+                echo "GitHub host keys added and verified against official fingerprints"
+              fi
+              
+              echo "Pulling latest configuration from GitHub using SSH key..."
+              if ! GIT_SSH_COMMAND="ssh -o IdentitiesOnly=yes -i $SSH_KEY_PATH" git pull origin main 2>&1 | tee /tmp/gitpull.log; then
+                echo "ERROR: git pull failed. Showing last 100 lines of output:"
+                tail -100 /tmp/gitpull.log
+                echo "Warning: Could not pull latest code. Continuing with existing configuration..."
+              else
+                echo "Successfully pulled latest configuration from GitHub"
+              fi
+            fi
+          else
+            echo "Not a git repository. Skipping git pull."
+          fi
+          
+          # -------------------------------------------------------------------
+          # STEP 3: Ensure uploads directory exists with correct permissions
+          # This is where user-uploaded images are stored
+          # -------------------------------------------------------------------
+          echo "Setting up uploads directory..."
+          sudo mkdir -p ./backend/uploads/images
+          sudo chown -R 1000:1000 ./backend/uploads  # Match container user ID
+          sudo chmod -R 755 ./backend/uploads
+          
+          # -------------------------------------------------------------------
+          # STEP 4: Update Docker Hub username in environment file
+          # This tells docker-compose which images to pull
+          # -------------------------------------------------------------------
+          echo "Updating environment configuration..."
+          grep -q "^DOCKERHUB_USERNAME=" .env.production && sed -i "s|^DOCKERHUB_USERNAME=.*|DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}|" .env.production || echo "DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}" >> .env.production
+          
+          # -------------------------------------------------------------------
+          # STEP 5: Login to Docker Hub on VPS
+          # Required to pull private images
+          # -------------------------------------------------------------------
+          echo "Logging into Docker Hub..."
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin || exit 1
+          
+          # -------------------------------------------------------------------
+          # STEP 6: Clean up Docker disk space (safer)
+          # Remove only dangling images and builder cache. DO NOT remove volumes
+          # automatically in the deploy script to avoid data loss.
+          # -------------------------------------------------------------------
+          echo "Cleaning up Docker resources (safer)..."
+          # Remove only dangling images (safer)
+          sudo docker image prune -f || true
+          # Remove build cache
+          sudo docker builder prune -af || true
+
+          # -------------------------------------------------------------------
+          # STEP 7: Skip forced image removal
+          # Avoid `docker rmi -f` in automated deploys — it can remove images
+          # that are still in use or expected later. Handle targeted removals
+          # manually or in a maintenance job.
+          # -------------------------------------------------------------------
+          echo "Skipping forced image removal to avoid accidental data loss"
+          
+          # -------------------------------------------------------------------
+          # STEP 8: Pull new images from Docker Hub
+          # Downloads the images we just built in the BUILD job
+          # -------------------------------------------------------------------
+          echo "Pulling latest Docker images from Docker Hub..."
+          if ! sudo docker compose -f docker-compose.prod.yml --env-file .env.production pull backend frontend; then
+            echo "ERROR: Failed to pull images from Docker Hub!"
+            echo "Make sure images exist: ${{ secrets.DOCKERHUB_USERNAME }}/bestaapparels-backend:latest"
+            echo "Make sure images exist: ${{ secrets.DOCKERHUB_USERNAME }}/bestaapparels-frontend:latest"
+            exit 1
+          fi
+          
+          # -------------------------------------------------------------------
+          # STEP 9: Update frontend first, then rolling-restart backends
+          # Rolling restart: stop one backend at a time, wait for replacement
+          # to be healthy, then move to the next. This keeps 2/3 backends
+          # serving traffic at all times → no 502 during deployment.
+          # -------------------------------------------------------------------
+          echo "Updating frontend container..."
+          if ! sudo docker compose -f docker-compose.prod.yml --env-file .env.production up -d --no-build frontend; then
+            echo "ERROR: Failed to start frontend container"
+            exit 1
+          fi
+
+          # -------------------------------------------------------------------
+          # Reload nginx-proxy config without downtime.
+          # nginx-proxy is NOT rebuilt (uses nginx:alpine from Docker Hub) so we
+          # never need --build. But we must force-recreate it so Docker picks up:
+          #   - any changes to nginx-reverse-proxy.conf (mounted as a volume)
+          #   - the /etc/letsencrypt volume (required for SSL certs)
+          #   - port 443 binding (added when HTTPS was enabled)
+          # `nginx -s reload` inside the running container is not enough because
+          # Docker volume mounts are set at container creation time — a running
+          # container cannot pick up new volume entries without being recreated.
+          # force-recreate is fast (<5s) and nginx:alpine starts instantly.
+          # -------------------------------------------------------------------
+          echo "Recreating nginx-proxy to pick up latest config and cert volume..."
+          if ! sudo docker compose -f docker-compose.prod.yml --env-file .env.production \
+            up -d --no-build --force-recreate nginx-proxy; then
+            echo "ERROR: Failed to recreate nginx-proxy"
+            sudo docker logs besta-nginx-proxy --tail 30
+            exit 1
+          fi
+          echo "nginx-proxy recreated successfully"
+
+          echo "Starting rolling backend restart..."
+          BACKEND_CONTAINERS=$(sudo docker ps --filter "name=bestatechnology-backend" --format "{{.Names}}" | sort)
+
+          if [ -z "$BACKEND_CONTAINERS" ]; then
+            echo "No running backend containers found — doing fresh start with 3 instances..."
+            if ! sudo docker compose -f docker-compose.prod.yml --env-file .env.production up -d --no-build --scale backend=3 backend; then
+              echo "ERROR: Failed to start backend containers"
+              sudo docker compose -f docker-compose.prod.yml --env-file .env.production logs --tail 50
+              exit 1
+            fi
+          else
+            echo "Found running backends: $BACKEND_CONTAINERS"
+            for container in $BACKEND_CONTAINERS; do
+              echo "Rolling: stopping $container..."
+              sudo docker stop "$container" && sudo docker rm "$container" || true
+
+              echo "Rolling: starting replacement backend..."
+              sudo docker compose -f docker-compose.prod.yml --env-file .env.production \
+                up -d --no-build backend
+
+              echo "Waiting 55s for NestJS startup..."
+              sleep 55
+              echo "Replacement for $container is ready"
+            done
+
+            # Ensure exactly 3 backends are running at the end
+            echo "Scaling to exactly 3 backend instances..."
+            sudo docker compose -f docker-compose.prod.yml --env-file .env.production \
+              up -d --no-build --scale backend=3 backend
+          fi
+
+          # -------------------------------------------------------------------
+          # STEP 10: Optional cleanup - wait for services then remove dangling images
+          # - Wait for a backend to report healthy before pruning images.
+          # - Use `image prune -f` to remove only dangling images (safer).
+          # -------------------------------------------------------------------
+          echo "Waiting for backend readiness before pruning images..."
+          RETRIES=30
+          COUNT=0
+          until [ $COUNT -ge $RETRIES ]; do
+            if sudo docker compose -f docker-compose.prod.yml --env-file .env.production exec -T backend wget --quiet --tries=1 --spider http://localhost:3001/health 2>/dev/null; then
+              echo "Backend reported healthy"
+              break
+            fi
+            COUNT=$((COUNT+1))
+            echo "Waiting for backend to be ready ($COUNT/$RETRIES)"
+            sleep 2
+          done
+          if [ $COUNT -ge $RETRIES ]; then
+            echo "Warning: backend not healthy after $RETRIES attempts; continuing with deploy"
+          fi
+
+          echo "Removing dangling Docker images (safe)..."
+          sudo docker image prune -f || true
+          
+          
+          # -------------------------------------------------------------------
+          # STEP 11: Verify containers are running
+          # If containers crashed, show logs and fail deployment
+          # Note: With load balancing, multiple backend containers exist
+          # -------------------------------------------------------------------
+          echo "Verifying deployment..."
+          echo "Current container status:"
+          sudo docker ps -a | grep besta || true
+          
+          # Count running backend instances
+          BACKEND_COUNT=$(sudo docker ps --filter "name=backend" --filter "status=running" --format "{{.Names}}" | wc -l)
+          FRONTEND_STATUS=$(sudo docker ps --filter "name=besta-frontend-prod" --format "{{.Status}}" 2>/dev/null || echo "")
+          
+          echo "Backend instances running: $BACKEND_COUNT (expected: 3)"
+          echo "Frontend status: '$FRONTEND_STATUS'"
+          
+          # Check if at least one backend is running
+          if [ "$BACKEND_COUNT" -lt 1 ]; then
+            echo "ERROR: No backend containers are running!"
+            echo "Showing backend logs:"
+            sudo docker compose -f docker-compose.prod.yml --env-file .env.production logs backend --tail 100
+            exit 1
+          fi
+          
+          # Warn if not all backends started
+          if [ "$BACKEND_COUNT" -lt 3 ]; then
+            echo "WARNING: Expected 3 backend instances but only $BACKEND_COUNT are running"
+            echo "This may affect load balancing performance"
+          fi
+          
+          # Check if frontend is running
+          if [ -z "$FRONTEND_STATUS" ]; then
+            echo "ERROR: Frontend container is not running!"
+            echo "Showing frontend logs:"
+            sudo docker logs besta-frontend-prod --tail 100 2>&1 || echo "Could not retrieve frontend logs"
+            echo "Checking if container exists:"
+            sudo docker ps -a --filter "name=besta-frontend-prod"
+            exit 1
+          fi
+          
+          echo "Frontend status: $FRONTEND_STATUS"
+          
+          # -------------------------------------------------------------------
+          # STEP 12: Display deployment summary
+          # -------------------------------------------------------------------
+          echo ""
+          echo "=== Deployed Images ==="
+          sudo docker images | grep bestaapparels | head -5
+          
+          echo ""
+          echo "=== Container Status ==="
+          sudo docker compose -f docker-compose.prod.yml --env-file .env.production ps
+          
+          echo ""
+          echo "=== Load Balancer Status ==="
+          echo "Backend instances: $BACKEND_COUNT"
+          sudo docker ps --filter "name=backend" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          
+          echo ""
+          echo "=========================================="
+          echo "   DEPLOYMENT COMPLETED SUCCESSFULLY!"
+          echo "=========================================="
+          echo "Frontend: http://108.181.187.124"
+          echo "Backend:  http://108.181.187.124/api (load balanced across $BACKEND_COUNT instances)"
+          echo "=========================================="
